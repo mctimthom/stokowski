@@ -186,6 +186,34 @@ class Orchestrator:
         if self.pool is not None:
             self.pool.release(self.project_name or "")
 
+    def _evict_issue_lifecycle_state(self, issue_id: str) -> None:
+        """Forget state for an issue that is no longer owned by this orchestrator."""
+        retry_timer = self._retry_timers.pop(issue_id, None)
+        if retry_timer:
+            retry_timer.cancel()
+        self.retry_attempts.pop(issue_id, None)
+        self._issue_current_state.pop(issue_id, None)
+        self._issue_state_runs.pop(issue_id, None)
+        self._pending_gates.pop(issue_id, None)
+        self._last_session_ids.pop(issue_id, None)
+        self.claimed.discard(issue_id)
+
+    def _stop_out_of_scope_issue(self, issue_id: str) -> None:
+        """Stop and release work for an issue outside the configured team."""
+        attempt = self.running.get(issue_id)
+        if attempt:
+            attempt.status = "canceled"
+            # The cancellation callback must not restore a session after the
+            # out-of-scope lifecycle state has been evicted.
+            attempt.session_id = None
+        task = self._tasks.get(issue_id)
+        if task:
+            task.cancel()
+        self.running.pop(issue_id, None)
+        self._tasks.pop(issue_id, None)
+        self._release_slot(issue_id)
+        self._evict_issue_lifecycle_state(issue_id)
+
     def _ensure_linear_client(self) -> LinearClient:
         if self._linear is None:
             self._linear = LinearClient(
@@ -665,6 +693,16 @@ class Orchestrator:
         for issue_id in gate_ids:
             current_state = states.get(issue_id)
             if current_state is None:
+                ident = self._last_issues.get(
+                    issue_id, Issue(id="", identifier=issue_id, title="")
+                ).identifier
+                gate_state = self._pending_gates.get(issue_id)
+                self._stop_out_of_scope_issue(issue_id)
+                logger.info(
+                    f"Gate evicted issue={ident} was={gate_state} "
+                    "(no longer in configured team)",
+                    extra={"linked_to": ident},
+                )
                 continue
             if current_state.strip().lower() in terminal_lower:
                 gate_state = self._pending_gates.pop(issue_id, None)
@@ -1043,6 +1081,7 @@ class Orchestrator:
             # turn completes — multi-turn loops would bypass gate
             # transitions and cause the agent to blow past stage
             # boundaries.
+            left_scope = False
             if state_name and state_cfg:
                 attempt = await run_turn(
                     runner_type=runner_type,
@@ -1065,7 +1104,16 @@ class Orchestrator:
                         try:
                             client = self._ensure_linear_client()
                             states = await client.fetch_issue_states_by_ids([issue.id])
-                            current_state = states.get(issue.id, issue.state)
+                            current_state = states.get(issue.id)
+                            if current_state is None:
+                                logger.info(
+                                    f"Issue {issue.identifier} no longer in configured "
+                                    "team, stopping",
+                                    extra={"linked_to": issue.identifier},
+                                )
+                                attempt.status = "canceled"
+                                left_scope = True
+                                break
                             state_lower = current_state.strip().lower()
                             active_lower = [
                                 s.strip().lower() for s in self.cfg.active_linear_states()
@@ -1103,6 +1151,8 @@ class Orchestrator:
                         break
 
             self._on_worker_exit(issue, attempt)
+            if left_scope:
+                self._evict_issue_lifecycle_state(issue.id)
 
         except asyncio.CancelledError:
             logger.info(f"Worker cancelled issue={issue.identifier}", extra={"linked_to": issue.identifier})
@@ -1399,6 +1449,12 @@ class Orchestrator:
         for issue_id in running_ids:
             current_state = states.get(issue_id)
             if current_state is None:
+                _ident = self.running[issue_id].issue_identifier if issue_id in self.running else issue_id
+                logger.info(
+                    f"Reconciliation: {_ident} no longer in configured team, stopping",
+                    extra={"linked_to": _ident},
+                )
+                self._stop_out_of_scope_issue(issue_id)
                 continue
 
             state_lower = current_state.strip().lower()

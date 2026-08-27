@@ -346,7 +346,7 @@ class LinearClient:
     async def fetch_issue_states_by_ids(
         self, issue_ids: list[str]
     ) -> dict[str, str]:
-        """Fetch current states for given issue IDs. Returns {id: state_name}."""
+        """Fetch states for IDs in scope. IDs outside the configured team are omitted."""
         if not issue_ids:
             return {}
 
