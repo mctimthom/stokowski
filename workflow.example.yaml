@@ -74,6 +74,7 @@
 tracker:
   kind: linear
   project_slug: "abc123def456"    # hex slugId from your Linear project URL
+  # team: "ENG"                    # optional team key; limits queried issues to this team
   api_key: "lin_api_your_key_here"  # your Linear API key — agents inherit this
 
 # ---------------------------------------------------------------------------
