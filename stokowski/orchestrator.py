@@ -693,6 +693,8 @@ class Orchestrator:
         for issue_id in gate_ids:
             current_state = states.get(issue_id)
             if current_state is None:
+                if not self.cfg.tracker.team:
+                    continue
                 ident = self._last_issues.get(
                     issue_id, Issue(id="", identifier=issue_id, title="")
                 ).identifier
@@ -1104,8 +1106,8 @@ class Orchestrator:
                         try:
                             client = self._ensure_linear_client()
                             states = await client.fetch_issue_states_by_ids([issue.id])
-                            current_state = states.get(issue.id)
-                            if current_state is None:
+                            current_state = states.get(issue.id, issue.state)
+                            if issue.id not in states and self.cfg.tracker.team:
                                 logger.info(
                                     f"Issue {issue.identifier} no longer in configured "
                                     "team, stopping",
@@ -1449,6 +1451,8 @@ class Orchestrator:
         for issue_id in running_ids:
             current_state = states.get(issue_id)
             if current_state is None:
+                if not self.cfg.tracker.team:
+                    continue
                 _ident = self.running[issue_id].issue_identifier if issue_id in self.running else issue_id
                 logger.info(
                     f"Reconciliation: {_ident} no longer in configured team, stopping",

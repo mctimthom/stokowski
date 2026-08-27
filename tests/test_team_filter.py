@@ -1,9 +1,11 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from stokowski.config import (
+    ClaudeConfig,
     LinearStatesConfig,
     ServiceConfig,
     StateConfig,
@@ -113,6 +115,127 @@ class TeamFilterTests(unittest.IsolatedAsyncioTestCase):
             ISSUES_BY_IDS_QUERY_WITH_TEAM,
             {"ids": [issue_id], "team": "ENG"},
         )
+
+    async def test_missing_active_issue_is_preserved_without_team_filter(self):
+        client = LinearClient("https://example.test", "key")
+        client._graphql = AsyncMock(return_value={"issues": {"nodes": []}})
+        self.addAsyncCleanup(client.close)
+
+        pool = ConcurrencyPool(global_cap=1)
+        orchestrator = Orchestrator("unused.yaml", project_name="project", pool=pool)
+        orchestrator.workflow = WorkflowDefinition(
+            config=ServiceConfig(),
+            prompt_template="",
+        )
+        orchestrator._linear = client
+
+        issue_id = "issue-id"
+        task = MagicMock()
+        orchestrator.running[issue_id] = RunAttempt(
+            issue_id=issue_id,
+            issue_identifier="ENG-1",
+        )
+        orchestrator._tasks[issue_id] = task
+        orchestrator.claimed.add(issue_id)
+        self.assertTrue(orchestrator._claim_slot(issue_id))
+        orchestrator._issue_current_state[issue_id] = "implement"
+        orchestrator._pending_gates[issue_id] = "review"
+
+        await orchestrator._reconcile()
+
+        task.cancel.assert_not_called()
+        self.assertIn(issue_id, orchestrator.running)
+        self.assertIn(issue_id, orchestrator._tasks)
+        self.assertIn(issue_id, orchestrator.claimed)
+        self.assertIn(issue_id, orchestrator._slot_held)
+        self.assertEqual(pool.total_running(), 1)
+        self.assertEqual(orchestrator._issue_current_state[issue_id], "implement")
+        self.assertEqual(orchestrator._pending_gates[issue_id], "review")
+        client._graphql.assert_awaited_once_with(
+            ISSUES_BY_IDS_QUERY,
+            {"ids": [issue_id]},
+        )
+
+    async def test_missing_pending_gate_is_evicted_only_with_team_filter(self):
+        for team, should_evict in (("ENG", True), ("", False)):
+            with self.subTest(team=team or None):
+                client = LinearClient("https://example.test", "key", team=team)
+                client._graphql = AsyncMock(return_value={"issues": {"nodes": []}})
+                self.addAsyncCleanup(client.close)
+                orchestrator = Orchestrator("unused.yaml")
+                orchestrator.workflow = WorkflowDefinition(
+                    config=ServiceConfig(tracker=TrackerConfig(team=team)),
+                    prompt_template="",
+                )
+                orchestrator._linear = client
+                orchestrator._pending_gates["issue-id"] = "review"
+                orchestrator._issue_current_state["issue-id"] = "review"
+
+                await orchestrator._evict_terminal_gates()
+
+                if should_evict:
+                    self.assertNotIn("issue-id", orchestrator._pending_gates)
+                    self.assertNotIn("issue-id", orchestrator._issue_current_state)
+                else:
+                    self.assertEqual(orchestrator._pending_gates["issue-id"], "review")
+                    self.assertEqual(orchestrator._issue_current_state["issue-id"], "review")
+
+    async def test_legacy_missing_state_stops_only_with_team_filter(self):
+        for team, expected_turns in (("ENG", 1), ("", 2)):
+            with self.subTest(team=team or None):
+                client = MagicMock()
+                client.fetch_issue_states_by_ids = AsyncMock(return_value={})
+                config = ServiceConfig(
+                    tracker=TrackerConfig(team=team),
+                    claude=ClaudeConfig(max_turns=2),
+                    states={
+                        "work": StateConfig(name="work", linear_state="active")
+                    },
+                )
+                orchestrator = Orchestrator("unused.yaml")
+                orchestrator.workflow = WorkflowDefinition(
+                    config=config,
+                    prompt_template="Work on {{ issue.identifier }}",
+                )
+                orchestrator._linear = client
+                issue = Issue(
+                    id="issue-id",
+                    identifier="ENG-1",
+                    title="Issue",
+                    state="In Progress",
+                )
+                attempt = RunAttempt(
+                    issue_id=issue.id,
+                    issue_identifier=issue.identifier,
+                    attempt=1,
+                    state_name="legacy",
+                )
+                orchestrator.running[issue.id] = attempt
+
+                async def complete_turn(**kwargs):
+                    current = kwargs["attempt"]
+                    current.status = "succeeded"
+                    return current
+
+                run_turn = AsyncMock(side_effect=complete_turn)
+                workspace = SimpleNamespace(path=Path(tempfile.gettempdir()))
+                with (
+                    patch(
+                        "stokowski.orchestrator.ensure_workspace",
+                        AsyncMock(return_value=workspace),
+                    ),
+                    patch("stokowski.orchestrator.run_turn", run_turn),
+                ):
+                    await orchestrator._run_worker(issue, attempt)
+
+                self.assertEqual(run_turn.await_count, expected_turns)
+                if team:
+                    self.assertEqual(attempt.status, "canceled")
+                    self.assertNotIn(issue.id, orchestrator.claimed)
+                else:
+                    self.assertEqual(attempt.status, "succeeded")
+                    self.assertIn(issue.id, orchestrator.retry_attempts)
+                    orchestrator._retry_timers[issue.id].cancel()
 
     async def test_queries_are_unchanged_when_team_is_omitted(self):
         client = LinearClient("https://example.test", "key")
