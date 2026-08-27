@@ -537,6 +537,7 @@ async def dry_run(workflow_path: str):
         client = LinearClient(
             endpoint=project.tracker.endpoint,
             api_key=project.resolved_api_key(),
+            team=project.tracker.team,
         )
         try:
             candidates = await client.fetch_candidate_issues(

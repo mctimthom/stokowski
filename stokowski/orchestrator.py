@@ -191,6 +191,7 @@ class Orchestrator:
             self._linear = LinearClient(
                 endpoint=self.cfg.tracker.endpoint,
                 api_key=self.cfg.resolved_api_key(),
+                team=self.cfg.tracker.team,
             )
         return self._linear
 
@@ -895,8 +896,8 @@ class Orchestrator:
         if issue.id in self.claimed:
             return False
 
-        # Blocker check for Todo
-        if state_lower == "todo":
+        # Blocker check for the configured todo state
+        if state_lower == self.cfg.linear_states.todo.strip().lower():
             for blocker in issue.blocked_by:
                 if blocker.state and blocker.state.strip().lower() not in terminal_lower:
                     return False

@@ -53,9 +53,64 @@ query($projectSlug: String!, $states: [String!]!, $after: String) {
 }
 """
 
+CANDIDATE_QUERY_WITH_TEAM = """
+query($projectSlug: String!, $states: [String!]!, $team: String!, $after: String) {
+  issues(
+    filter: {
+      project: { slugId: { eq: $projectSlug } }
+      state: { name: { in: $states } }
+      team: { key: { eq: $team } }
+    }
+    first: 50
+    after: $after
+    orderBy: createdAt
+  ) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    nodes {
+      id
+      identifier
+      title
+      description
+      priority
+      url
+      branchName
+      createdAt
+      updatedAt
+      state { name }
+      labels { nodes { name } }
+      inverseRelations {
+        nodes {
+          type
+          issue {
+            id
+            identifier
+            state { name }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
 ISSUES_BY_IDS_QUERY = """
 query($ids: [ID!]!) {
   issues(filter: { id: { in: $ids } }) {
+    nodes {
+      id
+      identifier
+      state { name }
+    }
+  }
+}
+"""
+
+ISSUES_BY_IDS_QUERY_WITH_TEAM = """
+query($ids: [ID!]!, $team: String!) {
+  issues(filter: { id: { in: $ids }, team: { key: { eq: $team } } }) {
     nodes {
       id
       identifier
@@ -71,6 +126,30 @@ query($projectSlug: String!, $states: [String!]!, $after: String) {
     filter: {
       project: { slugId: { eq: $projectSlug } }
       state: { name: { in: $states } }
+    }
+    first: 50
+    after: $after
+  ) {
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    nodes {
+      id
+      identifier
+      state { name }
+    }
+  }
+}
+"""
+
+ISSUES_BY_STATES_QUERY_WITH_TEAM = """
+query($projectSlug: String!, $states: [String!]!, $team: String!, $after: String) {
+  issues(
+    filter: {
+      project: { slugId: { eq: $projectSlug } }
+      state: { name: { in: $states } }
+      team: { key: { eq: $team } }
     }
     first: 50
     after: $after
@@ -195,9 +274,16 @@ def _normalize_issue(node: dict) -> Issue:
 
 
 class LinearClient:
-    def __init__(self, endpoint: str, api_key: str, timeout_ms: int = 30_000):
+    def __init__(
+        self,
+        endpoint: str,
+        api_key: str,
+        timeout_ms: int = 30_000,
+        team: str = "",
+    ):
         self.endpoint = endpoint
         self.api_key = api_key
+        self.team = team
         self.timeout = timeout_ms / 1000
         self._client = httpx.AsyncClient(
             headers={
@@ -233,10 +319,13 @@ class LinearClient:
                 "projectSlug": project_slug,
                 "states": active_states,
             }
+            if self.team:
+                variables["team"] = self.team
             if cursor:
                 variables["after"] = cursor
 
-            data = await self._graphql(CANDIDATE_QUERY, variables)
+            query = CANDIDATE_QUERY_WITH_TEAM if self.team else CANDIDATE_QUERY
+            data = await self._graphql(query, variables)
             issues_data = data.get("issues", {})
             nodes = issues_data.get("nodes", [])
 
@@ -261,7 +350,11 @@ class LinearClient:
         if not issue_ids:
             return {}
 
-        data = await self._graphql(ISSUES_BY_IDS_QUERY, {"ids": issue_ids})
+        variables = {"ids": issue_ids}
+        if self.team:
+            variables["team"] = self.team
+        query = ISSUES_BY_IDS_QUERY_WITH_TEAM if self.team else ISSUES_BY_IDS_QUERY
+        data = await self._graphql(query, variables)
         result = {}
         for node in data.get("issues", {}).get("nodes", []):
             if node and node.get("id") and node.get("state"):
@@ -280,10 +373,17 @@ class LinearClient:
                 "projectSlug": project_slug,
                 "states": states,
             }
+            if self.team:
+                variables["team"] = self.team
             if cursor:
                 variables["after"] = cursor
 
-            data = await self._graphql(ISSUES_BY_STATES_QUERY, variables)
+            query = (
+                ISSUES_BY_STATES_QUERY_WITH_TEAM
+                if self.team
+                else ISSUES_BY_STATES_QUERY
+            )
+            data = await self._graphql(query, variables)
             issues_data = data.get("issues", {})
             for node in issues_data.get("nodes", []):
                 if node and node.get("id"):

@@ -21,6 +21,7 @@ class TrackerConfig:
     endpoint: str = "https://api.linear.app/graphql"
     api_key: str = ""
     project_slug: str = ""
+    team: str = ""
 
 
 @dataclass
@@ -386,6 +387,7 @@ def _parse_tracker(raw: dict[str, Any]) -> TrackerConfig:
         endpoint=str(raw.get("endpoint", "https://api.linear.app/graphql")),
         api_key=str(raw.get("api_key", "")),
         project_slug=str(raw.get("project_slug", "")),
+        team=str(raw.get("team", "")),
     )
 
 
